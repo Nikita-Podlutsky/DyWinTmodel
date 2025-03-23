@@ -1,0 +1,25 @@
+# Игнорируем виртуальное окружение
+.venv/
+
+# Игнорируем кэш и временные файлы
+__pycache__/
+cache/
+preprocessed_data/
+
+# Игнорируем все чекпоинты, кроме best_model.pth
+checkpoints/
+!checkpoints/best_model.pth
+
+# Игнорируем файлы блокировок и зависимости
+uv.lock
+pyproject.toml
+
+# Игнорируем артефакты и скомпилированные файлы
+*.pyc
+*.pyo
+*.pyd
+
+# Игнорируем большие файлы данных и модели, кроме явно нужных
+*.pth
+!final_model.pth
+!checkpoints/best_model.pth
