@@ -55,7 +55,7 @@ class ConvolutionModule(nn.Module):
         self.depthwise_conv = nn.Conv1d(
             d_model, d_model, kernel_size=kernel_size, padding=(kernel_size - 1) // 2, groups=d_model
         )
-        self.batch_norm = nn.BatchNorm1d(d_model)
+        self.layer_norm2 = nn.LayerNorm(d_model)
         self.activation = nn.SiLU()
         self.pointwise_conv2 = nn.Conv1d(d_model, d_model, kernel_size=1)
         self.dropout = nn.Dropout(0.1)
@@ -69,7 +69,9 @@ class ConvolutionModule(nn.Module):
         x = self.layer_norm(x)
         x = self.glu(x)  # [B, C, T]
         x = self.depthwise_conv(x)  # [B, C, T]
-        x = self.batch_norm(x)
+        x = x.transpose(1, 2)
+        x = self.layer_norm2(x)
+        x = x.transpose(1, 2)
         x = self.activation(x)
         x = self.pointwise_conv2(x)  # [B, C, T]
         x = self.dropout(x)
@@ -96,9 +98,9 @@ class FeedForwardModule(nn.Module):
         x = self.dropout1(x)
         x = self.linear2(x)
         x = self.dropout2(x)
-        threshold = 1e-6
-        x = torch.where(x.abs() < threshold, torch.zeros_like(x), x)
-        return residual + 0.5 * x  # масштабирование, как в оригинальной статье
+        
+        x = torch.tanh(x)
+        return residual + 0.5 * x
 
     
 class ConformerBlock(nn.Module):
@@ -154,7 +156,7 @@ class ConformerSpectrogramTransformer(nn.Module):
             n_mels=n_mels)
         self.mel_bn = nn.BatchNorm2d(1)
         self.mel_embedding = nn.Linear(n_mels, hid_dim)
-        
+
         # MFCC processing components
         self.mfcc_transform = torchaudio.transforms.MFCC(
             sample_rate=sample_rate,
@@ -168,8 +170,9 @@ class ConformerSpectrogramTransformer(nn.Module):
         self.conformer = ConformerEncoder(
             d_model=hid_dim, nhead=8, num_layers=6, kernel_size=31
         )
-        self.cross_attention = nn.MultiheadAttention(hid_dim, num_heads=8)
+        self.cross_attention = nn.MultiheadAttention(hid_dim, num_heads=8, dropout=0.1, batch_first=True)
         self.fc = nn.Linear(hid_dim, vocab_size)
+        self.norm = nn.LayerNorm(hid_dim)
 
     def _process_features(self, x, transform, bn, embedding):
         # Feature extraction
@@ -197,7 +200,8 @@ class ConformerSpectrogramTransformer(nn.Module):
         # Process Mel and MFCC to get windows
         mel_windows = self._process_features(x, self.mel_transform, self.mel_bn, self.mel_embedding) # [B*N, W, D]
         mfcc_windows = self._process_features(x, self.mfcc_transform, self.mfcc_bn, self.mfcc_embedding) # [B*N, W, D]
-
+        mfcc_windows = torch.nan_to_num(mfcc_windows)
+        mel_windows = torch.nan_to_num(mel_windows)
         # Убедитесь, что количество окон и их размер совпадают для Mel и MFCC
         B_mel_n, W_mel, D_mel = mel_windows.shape
         B_mfcc_n, W_mfcc, D_mfcc = mfcc_windows.shape
@@ -205,6 +209,7 @@ class ConformerSpectrogramTransformer(nn.Module):
         N = B_mel_n // B
         W = W_mel
         D = D_mel
+        mel_orig_length = self.mel_transform(x).shape[-1]
 
         # Применяем кросс-внимание к окнам
         attn_out_windows, _ = self.cross_attention(
@@ -212,26 +217,22 @@ class ConformerSpectrogramTransformer(nn.Module):
             mel_windows.permute(1, 0, 2),  # K: [W, B*N, D]
             mfcc_windows.permute(1, 0, 2)  # V: [W, B*N, D]
         ) # attn_out_windows: [W, B*N, D]
-        threshold = 1e-8
-        attn_out_windows = torch.where(attn_out_windows.abs() < threshold, torch.zeros_like(attn_out_windows), attn_out_windows)
+
+        attn_out_windows = torch.tanh(attn_out_windows)
         attn_out_windows = attn_out_windows.permute(1, 0, 2) # [B*N, W, D]
-        attn_out_windows = attn_out_windows.reshape(B, N, W, D) # [B, N, 80, D]
-        attn_out_windows = attn_out_windows.permute(0, 3, 2, 1) # [B, D, 80, N]
-        attn_out_windows = attn_out_windows.reshape(B, -1, N) # [B, D * 80, N]
 
-        # Получаем оригинальную длину Mel spectrogram
-        mel_orig_length = self.mel_transform(x).shape[-1]
-        expected_output_length = (N - 1) * self.stride + self.window_size
+        # Ручная сборка с использованием overlap-add
+        output = torch.zeros((B, mel_orig_length, D), device=attn_out_windows.device)
+        attn_out_windows_reshaped = attn_out_windows.reshape(B, N, W, D)
 
-        output = F.fold(
-            attn_out_windows,
-            output_size=(1, expected_output_length),
-            kernel_size=(1, self.window_size),
-            stride=(1, self.stride),
-            padding=(0, 0)
-        ).permute(0, 2, 3, 1).squeeze(1) # [B, 1, T, D] -> [B, T, D]
+        for b in range(B):
+            for n in range(N):
+                start_time = n * self.stride
+                end_time = min(start_time + self.window_size, mel_orig_length)
+                window = attn_out_windows_reshaped[b, n, :end_time - start_time, :]
+                output[b, start_time:end_time, :] += window
 
-        return self.fc(output[:, :mel_orig_length, :])
+        return self.fc(torch.clamp(self.norm(output), min=-1.0, max=1.0))
 
         
 if __name__ == "__main__":

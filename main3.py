@@ -398,7 +398,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.1, patience=patience, verbose=True, min_lr=1e-8, cooldown=3
     )
-    
+
     train_losses = []
     val_losses = []
     grad_norms_history = []
@@ -413,7 +413,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
         total_train_loss = 0
         epoch_grad_norms = []  # собираем нормы градиентов по батчам
         epoch_weight_stats = {}  # для статистики весов, суммируя значения по параметрам
-        
+        ba_losses = []
         for batch_idx, batch in enumerate(tqdm.tqdm(train_loader, desc=f"Эпоха {epoch+1}/{epochs} (обучение)")):
             wave, sent, input_lengths = batch
             targets, target_lengths = prepare_targets_ctc(sent, vocab)
@@ -439,9 +439,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
             
             scaler.step(optimizer)
             scaler.update()
- 
+            for name, param in model.named_parameters():
+                if param.grad is not None and torch.isnan(param.grad).any():
+                    print(f"NaN gradient in {name}")
+                    param.grad = torch.zeros_like(param.grad)  # Замена NaN на нули
             total_train_loss += loss.item()
             
+            ba_losses.append(loss.item())
             # Сбор статистики по весам (нормы, минимум, максимум)
             with torch.no_grad():
                 for name, param in model.named_parameters():
@@ -457,7 +461,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
         avg_train_loss = total_train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         avg_grad_norm = sum(epoch_grad_norms) / len(epoch_grad_norms)
-        
+        # Построение графиков обучения
+        plt.figure(figsize=(10, 6))
+        plt.plot(ba_losses, label='Потеря на обучении')
+        plt.xlabel('Эпохи')
+        plt.ylabel('Потеря')
+        plt.title('График потерь при обучении')
+        plt.legend()
+        plt.savefig(os.path.join(checkpoint_dir, 'training_loss.png'))
+        plt.close()
+    
         # Усреднение статистики весов за эпоху
         weight_stats_summary = {}
         for name, stats in epoch_weight_stats.items():
@@ -707,10 +720,10 @@ if __name__ == "__main__":
     # Параметры
     batch_size = 2
     epochs = 200
-    learning_rate = 1e-6
+    learning_rate = 1e-4
     n_fft = 512
     hop_length = 160
-    hid_dim = 256
+    hid_dim = 32
     n_mels = 512
     window_size = 100
     sample_rate = 16000
@@ -755,10 +768,10 @@ if __name__ == "__main__":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Загружаем датасет только для получения словаря
-        dataset = initialize_dataset(load_metadata=True, max_samples = 100)
+        dataset = initialize_dataset(load_metadata=True, max_samples = 1000000)
         vocab = dataset.vocab
         print(vocab)
-        
+
         # Инициализация модели
         model = ConformerSpectrogramTransformer(sample_rate, n_fft, hop_length, n_mels, n_mfcc, hid_dim, window_size, overlap_ratio, dataset.vocab_size).to(device)
         
