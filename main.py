@@ -1,4 +1,4 @@
-from modelreal.DyWinT5 import ConformerSpectrogramTransformer
+from modelreal.DyWinT6 import ConformerSpectrogramTransformer
 
 import re
 import os
@@ -395,7 +395,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
     no_improvement = 0
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print("Общее число параметров:", pytorch_total_params)
-    
+    avg_train_loss = float("inf")
     for epoch in range(epochs):
         model.train()
         total_train_loss = 0
@@ -418,16 +418,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
                              torch.full((log_probs.shape[1],), log_probs.shape[0], dtype=torch.int), 
                              target_lengths)
             
-            loss.backward()
-            threshold = 200
+            if loss.item() < avg_train_loss*10:
+                loss.backward()
+                total_train_loss += loss.item()
+                ba_losses.append(loss.item())
+                optimizer.step()
+                
+            threshold = avg_train_loss*10
             if loss.item() > threshold:
                 print(f"Проблемный батч {batch_idx}, лосс: {loss.item()}")
-
+                total_train_loss += avg_train_loss
+                ba_losses.append(avg_train_loss)
+                
             # Градиентное клиппирование
             total_norm = clip_grad_norm_(model.parameters(), grad_clip_norm)
             epoch_grad_norms.append(total_norm.item())
             
-            optimizer.step()
+            # optimizer.step()
             
             # Проверка на NaN в градиентах
             for name, param in model.named_parameters():
@@ -435,8 +442,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
                     print(f"NaN в градиенте у {name}")
                     param.grad = torch.zeros_like(param.grad)
             
-            total_train_loss += loss.item()
-            ba_losses.append(loss.item())
+            # total_train_loss += loss.item()
+            # ba_losses.append(loss.item())
             
             # Сбор статистики по весам и градиентам
             with torch.no_grad():
@@ -503,11 +510,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
         print(f"  Средняя норма градиентов: {avg_grad_norm:.4f}")
         print(f"  Текущая скорость обучения: {current_lr:.6f}")
         print("  Статистика весов (средние значения):")
-        for name, stats in weight_stats_summary.items():
-            print(f"    {name}: param_norm_mean = {stats['param_norm_mean']:.4f}, "
-                  f"grad_norm_mean = {stats['grad_norm_mean']:.4f}, "
-                  f"grad_norm_max = {stats['grad_norm_max']:.4f}, "
-                  f"grad_norm_min = {stats['grad_norm_min']:.4f}")
+        # for name, stats in weight_stats_summary.items():
+        #     print(f"    {name}: param_norm_mean = {stats['param_norm_mean']:.4f}, "
+        #           f"grad_norm_mean = {stats['grad_norm_mean']:.4f}, "
+        #           f"grad_norm_max = {stats['grad_norm_max']:.4f}, "
+        #           f"grad_norm_min = {stats['grad_norm_min']:.4f}")
         
         # Сохранение чекпоинта
         checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth")
@@ -647,10 +654,10 @@ def run_training(sample_rate, n_fft, hop_length, n_mels, hid_dim, window_size, o
 
     
     # Загрузка тренировочного датасета
-    train_dataset = initialize_dataset(load_metadata=True, split="train", max_samples=100000000)
+    train_dataset = initialize_dataset(load_metadata=True, split="train", max_samples=1000)
     
     # Загрузка валидационного датасета
-    val_dataset = initialize_dataset(load_metadata=True, split="validation", max_samples=5000000)
+    val_dataset = initialize_dataset(load_metadata=True, split="validation", max_samples=50)
     
     
     # Создание загрузчиков данных
@@ -705,10 +712,10 @@ if __name__ == "__main__":
     # Параметры
     batch_size = 8
     epochs = 200
-    learning_rate = 1e-5
+    learning_rate = 1e-4
     n_fft = 512
     hop_length = 160
-    hid_dim = 32
+    hid_dim = 8
     n_mels = 512
     window_size = 100
     sample_rate = 16000

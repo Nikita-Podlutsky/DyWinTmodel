@@ -10,9 +10,7 @@ preprocessed_data/
 checkpoints/
 !checkpoints/best_model.pth
 
-# Игнорируем файлы блокировок и зависимости
-uv.lock
-pyproject.toml
+
 
 # Игнорируем артефакты и скомпилированные файлы
 *.pyc
