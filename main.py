@@ -1,4 +1,4 @@
-from DyWinT5 import ConformerSpectrogramTransformer
+from modelreal.DyWinT5 import ConformerSpectrogramTransformer
 
 import re
 import os
