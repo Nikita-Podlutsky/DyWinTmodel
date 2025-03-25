@@ -232,7 +232,7 @@ class ConformerSpectrogramTransformer(nn.Module):
                 window = attn_out_windows_reshaped[b, n, :end_time - start_time, :]
                 output[b, start_time:end_time, :] += window
 
-        return self.fc(torch.clamp(self.norm(output), min=-1.0, max=1.0))
+        return self.fc(torch.tanh(self.norm(output)))
 
         
 if __name__ == "__main__":

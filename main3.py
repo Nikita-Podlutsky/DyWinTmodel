@@ -377,22 +377,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
                 grad_clip_norm=1.0):
     """
     Обучает модель с ранней остановкой, сохранением чекпоинтов и подробным логированием статистики.
-    
-    Args:
-        model: модель для обучения
-        train_loader: загрузчик тренировочных данных
-        val_loader: загрузчик валидационных данных
-        criterion: функция потерь
-        optimizer: оптимизатор
-        device: устройство (cuda/cpu)
-        epochs: максимальное количество эпох
-        patience: количество эпох для ранней остановки
-        checkpoint_dir: директория для чекпоинтов
-        vocab: словарь для подготовки таргетов
-        grad_clip_norm: максимальная норма градиента для клиппинга
+    (Без использования смешанной точности)
     """
     os.makedirs(checkpoint_dir, exist_ok=True)
-    scaler = torch.amp.GradScaler()  # Автоматическое масштабирование градиентов
     
     # Планировщик скорости обучения (например, по снижению при отсутствии улучшения)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -407,13 +394,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
     best_val_loss = float('inf')
     no_improvement = 0
     pytorch_total_params = sum(p.numel() for p in model.parameters())
-    print(pytorch_total_params)
+    print("Общее число параметров:", pytorch_total_params)
+    
     for epoch in range(epochs):
         model.train()
         total_train_loss = 0
         epoch_grad_norms = []  # собираем нормы градиентов по батчам
-        epoch_weight_stats = {}  # для статистики весов, суммируя значения по параметрам
+        epoch_weight_stats = {}  # статистика весов по слоям
         ba_losses = []
+        
         for batch_idx, batch in enumerate(tqdm.tqdm(train_loader, desc=f"Эпоха {epoch+1}/{epochs} (обучение)")):
             wave, sent, input_lengths = batch
             targets, target_lengths = prepare_targets_ctc(sent, vocab)
@@ -422,37 +411,39 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
             target_lengths = target_lengths.to(device)
             
             optimizer.zero_grad()
-            with torch.amp.autocast(device_type=device.type):
-                # Получение выходных данных модели
-                outputs = model(wave.float())
-                # Преобразование выходных данных для CTC-loss
-                log_probs = outputs.log_softmax(2).permute(1, 0, 2)
-                # print(log_probs.shape, targets.shape, input_lengths, target_lengths)
-                loss = criterion(log_probs, targets, torch.full((log_probs.shape[1],), log_probs.shape[0], dtype=torch.int), target_lengths)
+            # --- Без автокаста и масштабирования градиентов ---
+            outputs = model(wave.float())
+            log_probs = outputs.log_softmax(2).permute(1, 0, 2)
+            loss = criterion(log_probs, targets, 
+                             torch.full((log_probs.shape[1],), log_probs.shape[0], dtype=torch.int), 
+                             target_lengths)
+            
+            loss.backward()
+            threshold = 200
+            if loss.item() > threshold:
+                print(f"Проблемный батч {batch_idx}, лосс: {loss.item()}")
 
-            
-            scaler.scale(loss).backward()
-            
-            # Градиентный клиппинг
+            # Градиентное клиппирование
             total_norm = clip_grad_norm_(model.parameters(), grad_clip_norm)
             epoch_grad_norms.append(total_norm.item())
             
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
+            
+            # Проверка на NaN в градиентах
             for name, param in model.named_parameters():
                 if param.grad is not None and torch.isnan(param.grad).any():
-                    print(f"NaN gradient in {name}")
-                    param.grad = torch.zeros_like(param.grad)  # Замена NaN на нули
-            total_train_loss += loss.item()
+                    print(f"NaN в градиенте у {name}")
+                    param.grad = torch.zeros_like(param.grad)
             
+            total_train_loss += loss.item()
             ba_losses.append(loss.item())
-            # Сбор статистики по весам (нормы, минимум, максимум)
+            
+            # Сбор статистики по весам и градиентам
             with torch.no_grad():
                 for name, param in model.named_parameters():
                     if param.requires_grad and param.grad is not None:
                         param_norm = param.data.norm(2).item()
                         grad_norm = param.grad.data.norm(2).item()
-                        # Инициализируем статистику, если нужно
                         if name not in epoch_weight_stats:
                             epoch_weight_stats[name] = {'param_norms': [], 'grad_norms': []}
                         epoch_weight_stats[name]['param_norms'].append(param_norm)
@@ -461,10 +452,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
         avg_train_loss = total_train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         avg_grad_norm = sum(epoch_grad_norms) / len(epoch_grad_norms)
-        # Построение графиков обучения
+        
+        # Построение графика потерь (опционально)
         plt.figure(figsize=(10, 6))
         plt.plot(ba_losses, label='Потеря на обучении')
-        plt.xlabel('Эпохи')
+        plt.xlabel('Шаги обучения')
         plt.ylabel('Потеря')
         plt.title('График потерь при обучении')
         plt.legend()
@@ -494,15 +486,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
                 targets = targets.to(device)
                 target_lengths = target_lengths.to(device)
                 
-            
-            
-                with torch.amp.autocast(device_type=device.type):
-                    # Получение выходных данных модели
-                    outputs = model(wave.float())
-                    # Преобразование выходных данных для CTC-loss
-                    log_probs = outputs.log_softmax(2).permute(1, 0, 2)
-                    # print(log_probs.shape, targets.shape, input_lengths, target_lengths)
-                    loss = criterion(log_probs, targets, torch.full((log_probs.shape[1],), log_probs.shape[0], dtype=torch.int), target_lengths)
+                outputs = model(wave.float())
+                log_probs = outputs.log_softmax(2).permute(1, 0, 2)
+                loss = criterion(log_probs, targets, 
+                                 torch.full((log_probs.shape[1],), log_probs.shape[0], dtype=torch.int), 
+                                 target_lengths)
                 total_val_loss += loss.item()
         
         avg_val_loss = total_val_loss / len(val_loader)
@@ -514,7 +502,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
         print(f"  Потеря на валидации: {avg_val_loss:.4f}")
         print(f"  Средняя норма градиентов: {avg_grad_norm:.4f}")
         print(f"  Текущая скорость обучения: {current_lr:.6f}")
-        print("  Статистика весов и градиентов (средние значения по слоям):")
+        print("  Статистика весов (средние значения):")
         for name, stats in weight_stats_summary.items():
             print(f"    {name}: param_norm_mean = {stats['param_norm_mean']:.4f}, "
                   f"grad_norm_mean = {stats['grad_norm_mean']:.4f}, "
@@ -533,7 +521,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
             'weight_stats': weight_stats_summary,
         }, checkpoint_path)
         
-        # Сохранение лучшей модели для ранней остановки
+        # Сохранение лучшей модели
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             no_improvement = 0
@@ -554,10 +542,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
                 print(f"Ранняя остановка на эпохе {epoch+1}")
                 break
 
-        # Обновляем scheduler по валидационной или обучающей потере (здесь используется обучение)
         scheduler.step(avg_train_loss)
     
-    # Построение графиков обучения
+    # Сохранение итоговых графиков
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Потеря на обучении')
     plt.plot(val_losses, label='Потеря на валидации')
@@ -568,7 +555,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device,
     plt.savefig(os.path.join(checkpoint_dir, 'training_loss.png'))
     plt.close()
     
-    # Можно сохранить также историю градиентов и статистику весов, если это необходимо
     torch.save({
         'train_losses': train_losses,
         'val_losses': val_losses,
@@ -614,15 +600,15 @@ def predict(model, audio_path, transform, device, vocab):
     
     # Ресемплинг до нужной частоты, если необходимо
     if sr != sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, sample_rate)
+        resampler = torchaudio.transforms.Resample(sr, 16000)
         waveform = resampler(waveform)
     
     # Преобразование в MEL-спектрограмму
-    mel_spec = transform(waveform).unsqueeze(0).to(device)
-    
+    # mel_spec = transform(waveform).unsqueeze(0)
+    print(waveform.shape)
     # Предсказание
     with torch.no_grad():
-        outputs = model(mel_spec)
+        outputs = model(waveform[:,:16000*200].to(device))
     
     # Декодирование результатов (зависит от вашей задачи)
     predicted_text = decode_prediction(outputs, vocab)
@@ -718,7 +704,7 @@ def run_training(sample_rate, n_fft, hop_length, n_mels, hid_dim, window_size, o
 if __name__ == "__main__":
     
     # Параметры
-    batch_size = 2
+    batch_size = 8
     epochs = 200
     learning_rate = 1e-4
     n_fft = 512
