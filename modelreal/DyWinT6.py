@@ -63,7 +63,7 @@ class ConvolutionModule(nn.Module):
         self.depthwise_conv = nn.Conv1d(
             d_model, d_model, kernel_size=kernel_size, padding=(kernel_size - 1) // 2, groups=d_model
         )
-        self.layer_norm2 = nn.LayerNorm(d_model)
+        # self.layer_norm2 = nn.LayerNorm(d_model)
         self.activation = nn.SiLU()
         self.pointwise_conv2 = nn.Conv1d(d_model, d_model, kernel_size=1)
         self.dropout = nn.Dropout(0.1)
@@ -71,14 +71,17 @@ class ConvolutionModule(nn.Module):
     def forward(self, x):
         # x: [B, T, C]
         residual = x
+        
         x = self.layer_norm(x)
         x = x.transpose(1, 2)  # [B, C, T]
         x = self.pointwise_conv1(x)  # [B, 2*C, T]
-        x = self.layer_norm(x)
+        # print(x.shape)
+        
+        # x = self.layer_norm(x)
         x = self.glu(x)  # [B, C, T]
         x = self.depthwise_conv(x)  # [B, C, T]
         x = x.transpose(1, 2)
-        x = self.layer_norm2(x)
+        # x = self.layer_norm2(x)
         x = x.transpose(1, 2)
         x = self.activation(x)
         x = self.pointwise_conv2(x)  # [B, C, T]
@@ -131,9 +134,11 @@ class ConformerBlock(nn.Module):
         x = self.self_attn_layer_norm(x)
         x, _ = self.self_attn(x, x, x, attn_mask=attn_mask)
         x = residual + x
+        # print(x.shape)
         x = self.conv_module(x)
         x = self.ffn2(x)
         x = self.final_layer_norm(x)
+        # print(x.shape)
         return x
 
     
@@ -147,6 +152,7 @@ class ConformerEncoder(nn.Module):
     
     def forward(self, x, attn_mask=None):
         for layer in self.layers:
+            # print(x.shape)
             x = layer(x, attn_mask)
         return x
 
@@ -178,7 +184,10 @@ class ConformerSpectrogramTransformer(nn.Module):
 
         # Shared components
         self.pos_enc = PositionalEncoding2D(hid_dim)
-        self.conformer = ConformerEncoder(
+        self.mfcc_conformer = ConformerEncoder(
+            d_model=hid_dim, nhead=8, num_layers=6, kernel_size=31
+        )
+        self.mel_conformer = ConformerEncoder(
             d_model=hid_dim, nhead=8, num_layers=6, kernel_size=31
         )
         self.cross_attention = nn.MultiheadAttention(hid_dim, num_heads=8, dropout=0.1, batch_first=True)
@@ -189,11 +198,17 @@ class ConformerSpectrogramTransformer(nn.Module):
         # Feature extraction
         x_features = transform(x).unsqueeze(1)
         x_features = bn(x_features).squeeze(1)
-
+        # print(x_features.shape)
+        
+        # x_features = self.conformer(x_features)
+        # print(x_features.shape)
         # Project features
         B, D, T = x_features.shape
         x_features = x_features.permute(0, 2, 1)
+        
         x_features = embedding(x_features)
+        # print(x_features.shape)
+        
         x_features = x_features.permute(0, 2, 1)  # [B, hid_dim, T]
 
         # Positional encoding
@@ -223,6 +238,10 @@ class ConformerSpectrogramTransformer(nn.Module):
         mel_orig_length = self.mel_transform(x).shape[-1]
 
         # Применяем кросс-внимание к окнам
+        # print(mfcc_windows.shape)
+        # print(mel_windows.shape)
+        mfcc_windows = self.mfcc_conformer(mfcc_windows)
+        mel_windows = self.mel_conformer(mel_windows)
         attn_out_windows, _ = self.cross_attention(
             mfcc_windows.permute(1, 0, 2),  # Q: [W, B*N, D]
             mel_windows.permute(1, 0, 2),   # K: [W, B*N, D]
@@ -233,7 +252,7 @@ class ConformerSpectrogramTransformer(nn.Module):
         attn_out_windows = attn_out_windows.permute(1, 0, 2)  # [B*N, W, D]
 
         # Встраиваем Conformer
-        attn_out_windows = self.conformer(attn_out_windows)  # [B*N, W, D]
+        # attn_out_windows = self.conformer(attn_out_windows)  # [B*N, W, D]
 
         # Ручная сборка с использованием overlap-add
         output = torch.zeros((B, mel_orig_length, D), device=attn_out_windows.device)
@@ -252,7 +271,7 @@ class ConformerSpectrogramTransformer(nn.Module):
         
 if __name__ == "__main__":
     # Параметры
-    hid_dim = 256
+    hid_dim = 32
     n_mels = 128
     n_mfcc = 128
     n_fft = 512
