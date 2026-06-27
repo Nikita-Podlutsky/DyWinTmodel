@@ -1,0 +1,6 @@
+# @package _global_
+mode_name: "demo"
+num_epochs: 1
+learning_rate: 1e-3
+window_size_ms: 1000
+hop_size_ms: 500

@@ -1,0 +1,5 @@
+# @package _global_
+dataset:
+  mock: true
+  audio_path: ""
+  sample_rate: 16000

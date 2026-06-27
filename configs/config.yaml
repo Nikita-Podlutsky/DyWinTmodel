@@ -1,0 +1,8 @@
+defaults:
+  - dataset: mock
+  - mode: demo
+  - _self_
+
+save_dir: "./checkpoints"
+device: "cpu"
+num_workers: 0
